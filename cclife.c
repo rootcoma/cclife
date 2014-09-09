@@ -5,19 +5,27 @@
 #include <signal.h>
 #include <string.h>
 #include <time.h>
-#include <sys/time.h>
 #include <assert.h>
-/* TODO Replace sys/time */
+
 #define min(a,b) a < b ? a : b
 #define max(a,b) a > b ? a : b
 
-#define SPEED_CHANGE_AMOUNT 5 // 5msec steps 
-#define SLEEP_TIME 200 // msec to sleep
+#define COLOR_BACKGROUND 15
+#define COLOR_SURVIVE 8
+#define COLOR_BIRTH 0
+#define COLOR_DEAD_STARVE 7
+#define COLOR_DEAD_OVERPOPULATED 11
+
+#define B "3"
+#define S "23"
 #define MIN_SPEED 1
 #define MAX_SPEED 5000
-#define FONT_SIZE 8
+#define SLEEP_TIME 200
+#define SPEED_CHANGE_AMOUNT 5
 #define DATA_WIDTH 8
+#define BIT_CHAR ' '
 #define COLS_PER_BIT 2
+#define FONT_SIZE 8
 #define MAX_WIDTH 1920/(FONT_SIZE/2*COLS_PER_BIT)
 #define MAX_HEIGHT 1080/FONT_SIZE
 
@@ -26,11 +34,12 @@ typedef struct board_t {
 	unsigned int w, h;	
 } board_t;
 
-static int cursor_x, cursor_y;
-static int speed;
+static char life_b[10], life_s[10];
 static unsigned int last_width, last_height;
+static int speed;
+static int cursor_x, cursor_y;
+static struct timespec start_clock, end_clock;
 static struct board_t board, board_buffer;
-static struct timeval last_run;
 
 unsigned int get_aligned_width (const board_t *b)
 {
@@ -75,14 +84,12 @@ void resize_life (void)
 	const int new_height = min(MAX_HEIGHT, LINES);
 	if (new_width != last_width || new_height != last_height) {
 		last_width = new_width;
-		last_height = new_height;
-		/* copy board to buffer */
+		last_height = new_height;	
 		create_board(new_width, new_height, &board_buffer);
 		int i, j;
 		for (i=0;i<new_height && i<board.h;i++)
 			for (j=0;j<new_width && j<board.w;j++)
 				set_bit(j, i, get_bit(j, i, &board), &board_buffer);
-		/* resize alloc for board and cpy from buffer */
 		create_board(new_width, new_height, &board);
 		memcpy(board.data, board_buffer.data, sizeof(uint8_t)*get_board_size(&board));
 	}	
@@ -92,8 +99,7 @@ uint8_t count_neighbors (const int x, const int y, const board_t *b)
 {
 	uint8_t count = 0;
 	int i, tar_x, tar_y;
-	/* loop around pacman style */
-	#define clip_bounds(tar, max, val) tar=val; while(tar<0) tar+=max; tar=tar%max
+	#define clip_bounds(tar, max, val) for(tar=val;tar<0;tar+=max); tar=tar%max
 	for (i=0;i<9;i++) {
 		if (i==4)
 			continue;
@@ -108,22 +114,26 @@ uint8_t count_neighbors (const int x, const int y, const board_t *b)
 
 void draw_life (void)
 {
-	int i, j;
+	int i, j, k;
 	uint8_t p;
 	for (i=0;i<board.h;i++)
 		for (j=0;j<board.w;j++) {
-			p = 0;
+			p = 5;
 			if (get_bit(j, i, &board)) {
-				p = count_neighbors(j, i, &board)-1;
-				if (p < 1)
+				p = count_neighbors(j, i, &board);
+				if (strchr(life_b, '0'+p) != NULL)
+					p=2;
+				else if (strchr(life_s, '0'+p) != NULL)
+					p=1;
+				else if (p<3)
 					p=3;
-				else if (p > 2)
+				else
 					p=4;
 			}
 			attron(COLOR_PAIR(p));
-			/* make sure COLS_PER_BIT matches num chars printed here */
-			mvaddch(i, j*COLS_PER_BIT, ' ');
-			addch(' ');
+			move(i, j*COLS_PER_BIT);
+			for (k=0;k<COLS_PER_BIT;k++)
+				addch(BIT_CHAR);
 			attroff(COLOR_PAIR(p));
 		}
 }
@@ -141,12 +151,16 @@ void step_life (void)
 	memcpy(board_buffer.data, board.data, sizeof(uint8_t)*get_board_size(&board));
 	int i, j;
 	uint8_t n;
+	bool p;
 	for (i=0;i<board.h;i++)
-		for (j=0;j<board.w;j++)
-			if((n = count_neighbors(j, i, &board_buffer)) == 3)
+		for (j=0;j<board.w;j++) {
+			p = get_bit(j, i, &board_buffer);
+			n = count_neighbors(j, i, &board_buffer);
+			if(!p && strchr(life_b, '0'+n) != NULL)
 				set_bit(j, i, TRUE, &board);
-			else if (n < 2 || n > 3)
+			else if(p && strchr(life_s, '0'+n) == NULL)
 				set_bit(j, i, FALSE, &board);
+		}
 }
 
 void reset_life (void)
@@ -176,7 +190,7 @@ void handle_input (const int c, const bool cursor)
 	}
 	if (!cursor) /* game is playing */
 		switch (c) {
-			case 'p': pause_life(); break;
+			case 'p': pause_life(); return;
 			case 'm': /* speed control */
 			case 'n':
 				speed += c=='n' ? SPEED_CHANGE_AMOUNT : -SPEED_CHANGE_AMOUNT;
@@ -215,10 +229,24 @@ void pause_life (void)
 	curs_set(0);
 }
 
-void init (void)
+void init (char *rules)
 {
 	srand(time(NULL));
-	memset(&last_run, 0, sizeof(struct timeval));
+	if (rules != NULL) {
+		int i;
+		char *p = rules;
+		for(i=0;i<13 && *p;i++, p++)
+			if (*p >= 'a' && *p <= 'z')
+				*p += 'A'-'a';
+		if (sscanf(rules, "B%9[0-8]/S%9[0-8]", life_b, life_s) < 1) {
+			fprintf(stderr, "Error: Could not parse rules.\nCorrect format: B3/S23");
+			exit(EXIT_FAILURE);
+		}
+	} else {
+		strcpy(life_b, B);
+		strcpy(life_s, S);
+	}
+	memset(&start_clock, 0, sizeof(struct timespec));
 	memset(&board_buffer, 0, sizeof(struct board_t));
 	memset(&board, 0, sizeof(struct board_t));
 	/* curses config */
@@ -229,10 +257,11 @@ void init (void)
 	noecho();
 	if(has_colors()) {
 		start_color();
-		init_pair(1, COLOR_WHITE,  8); /* Gray, 2 neighbors  */
-		init_pair(2, COLOR_WHITE,  0); /* Black, 3 neighbors */
-		init_pair(3, COLOR_WHITE,  7); /* light gray <2 neighbor */
-		init_pair(4, COLOR_WHITE, 11); /* yellow/green >3 neighbor */
+		init_pair(1, COLOR_BACKGROUND, COLOR_SURVIVE);
+		init_pair(2, COLOR_BACKGROUND, COLOR_BIRTH);
+		init_pair(3, COLOR_BACKGROUND, COLOR_DEAD_STARVE);
+		init_pair(4, COLOR_BACKGROUND, COLOR_DEAD_OVERPOPULATED);
+		init_pair(5, COLOR_BACKGROUND, COLOR_BACKGROUND);
 	}
 	/* start a new game with random data */
 	reset_life();
@@ -251,11 +280,10 @@ void cleanup_life (void)
 void run_life (void)
 {
 	int input = ERR;
-	struct timeval current_time;
 	do {
-		gettimeofday(&current_time, NULL);
-		if ((current_time.tv_sec-last_run.tv_sec)*1000 + (current_time.tv_usec-last_run.tv_usec)/1000 > speed) {
-			last_run = current_time; 
+		clock_gettime(CLOCK_MONOTONIC, &end_clock);	
+		if ((end_clock.tv_sec-start_clock.tv_sec)*1000 + (end_clock.tv_nsec-start_clock.tv_nsec)/1000000 > speed) {
+			start_clock = end_clock; 
 			resize_life();
 			step_life();
 			draw_life();
@@ -270,13 +298,12 @@ void handle_signal (const int signal)
 	exit(EXIT_SUCCESS);
 }
 
-int main (void)
+int main (int argc, char **argv)
 {
 	atexit(cleanup_life);
 	signal(SIGINT, handle_signal);
 	signal(SIGTERM, handle_signal);
-	init();
+	init(argc > 1 ?  argv[1] : NULL);
 	run_life();
 	return EXIT_SUCCESS;
 }
-

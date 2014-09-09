@@ -1,2 +1,2 @@
 all:
-	gcc -Wall -o cclife cclife.c -lncurses
+	gcc -std=gnu99 -Wall -o cclife cclife.c -lncurses -lrt
